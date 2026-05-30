@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging/build outputs
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+*.json
+*.pem
+*.key
+
+# Generated decomposition outputs
+audio_temp/
+image_temp/
+result_temp/
+work/
+outputs/
+data/
+
+# Media files used for local testing
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.mp3
+*.m4a
+
+# OS/editor
+.DS_Store
+Thumbs.db

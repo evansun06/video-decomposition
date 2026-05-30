@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-decompose-migration"
+version = "0.1.0"
+description = "Minimal migrated YouTube video decomposition and Google Speech-to-Text source."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-cloud-speech>=2.21.0",
+    "google-cloud-storage>=2.10.0",
+    "imageio-ffmpeg>=0.6.0",
+    "moviepy>=1.0.3",
+    "pliers>=0.4.2",
+    "pydub>=0.25.1",
+    "tqdm>=4.67.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
