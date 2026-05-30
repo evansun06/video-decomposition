@@ -9,7 +9,7 @@ It can:
 - cut video frames into `image_temp/`
 - extract audio into `audio_temp/audio_full.wav`
 - optionally transcribe that audio with Google Speech-to-Text v1
-- write a simple transcript to `result_temp/transcript.txt`
+- write the original transcript outputs to `result_temp/`
 
 It intentionally does **not** include Face++, DeepFace, speech emotion,
 aggregation, cleaning, batching, SQLite status tracking, or Google v2
@@ -80,6 +80,8 @@ result = decompose_video(
 )
 
 print(result.transcript_path)
+print(result.transcription.text_panel_path)
+print(result.transcription.sentence_panel_path)
 ```
 
 For frame/audio extraction only:
@@ -105,5 +107,7 @@ work_dir/
     audio_full_left.wav   # only if source audio is stereo
     audio_full_right.wav  # only if source audio is stereo
   result_temp/
-    transcript.txt        # only when transcribe=True
+    script_google.txt          # full transcript, only when transcribe=True
+    text_panel_google.csv      # word-level timing panel, only when transcribe=True
+    google_sentence_panel.csv  # sentence-level timing panel, only when transcribe=True
 ```
