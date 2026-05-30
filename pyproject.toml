@@ -9,7 +9,7 @@ description = "Minimal migrated YouTube video decomposition and Google Speech-to
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "google-cloud-speech>=2.21.0",
+    "google-cloud-speech>=2.34.0",
     "google-cloud-storage>=2.10.0",
     "imageio-ffmpeg>=0.6.0",
     "moviepy>=1.0.3",

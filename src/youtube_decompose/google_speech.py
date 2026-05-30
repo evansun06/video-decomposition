@@ -25,6 +25,9 @@ def build_google_credentials(config: GoogleSpeechConfig) -> Any | None:
     if config.credentials_path and config.credentials_info:
         raise ValueError("Pass either credentials_path or credentials_info, not both.")
 
+    if not config.credentials_path and not config.credentials_info:
+        return None
+
     from google.oauth2 import service_account
 
     if config.credentials_path:
@@ -38,6 +41,21 @@ def build_google_credentials(config: GoogleSpeechConfig) -> Any | None:
         )
 
     return None
+
+
+def build_recognizer_name(config: GoogleSpeechConfig) -> str:
+    """Build a Speech-to-Text v2 recognizer resource name."""
+
+    if not config.project_id:
+        raise ValueError(
+            "project_id is required for Google Speech-to-Text v2. Set "
+            "GOOGLE_CLOUD_PROJECT or include project_id in GOOGLE_SERVICE_ACCOUNT_JSON."
+        )
+
+    return (
+        f"projects/{config.project_id}/locations/{config.location}/"
+        f"recognizers/{config.recognizer_id}"
+    )
 
 
 def generate_unique_filename(base_name: str) -> str:
@@ -80,8 +98,16 @@ def upload_audio_to_gcs(
 
 
 def _duration_seconds(value: Any) -> float:
+    if value is None:
+        return 0.0
     if hasattr(value, "total_seconds"):
         return float(value.total_seconds())
+
+    seconds = getattr(value, "seconds", None)
+    nanos = getattr(value, "nanos", None)
+    if seconds is not None or nanos is not None:
+        return float(seconds or 0) + float(nanos or 0) / 1_000_000_000
+
     return float(value)
 
 
@@ -94,8 +120,14 @@ def _word_rows_from_google_response(response: Any) -> list[dict[str, Any]]:
 
         for word_info in result.alternatives[0].words:
             text = word_info.word
-            onset = _duration_seconds(word_info.start_time)
-            offset = _duration_seconds(word_info.end_time)
+            start_offset = getattr(
+                word_info, "start_offset", getattr(word_info, "start_time", None)
+            )
+            end_offset = getattr(
+                word_info, "end_offset", getattr(word_info, "end_time", None)
+            )
+            onset = _duration_seconds(start_offset)
+            offset = _duration_seconds(end_offset)
             rows.append(
                 {
                     "Text": text,
@@ -187,57 +219,66 @@ def transcribe_audio_with_google(
     result_dir: str | Path,
     config: GoogleSpeechConfig,
 ) -> GoogleTranscriptionResult:
-    """Transcribe a local WAV file via Google Speech-to-Text v1."""
+    """Transcribe a local WAV file via Google Speech-to-Text v2 batch recognize."""
 
-    from google.cloud import speech_v1p1beta1 as speech
-    from pydub import AudioSegment
+    from google.cloud.speech_v2 import SpeechClient
+    from google.cloud.speech_v2.types import cloud_speech
 
     audio_path = Path(audio_path)
     result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 
     credentials = build_google_credentials(config)
-    speech_client = speech.SpeechClient(credentials=credentials)
+    speech_client = SpeechClient(credentials=credentials)
     gcs_uri = upload_audio_to_gcs(audio_path, config)
+    recognizer = build_recognizer_name(config)
 
-    audio_segment = AudioSegment.from_file(audio_path)
-    metadata = speech.RecognitionMetadata(
-        interaction_type=speech.RecognitionMetadata.InteractionType.PRESENTATION,
-        original_media_type=speech.RecognitionMetadata.OriginalMediaType.VIDEO,
-        audio_topic=config.audio_topic,
-    )
-    speech_contexts = [
-        speech.SpeechContext(phrases=[phrase])
-        for phrase in config.speech_context_phrases
+    phrase_hints = [
+        phrase for phrase in config.speech_context_phrases if phrase.strip()
     ]
+    adaptation = None
+    if phrase_hints:
+        phrase_set = cloud_speech.PhraseSet(
+            phrases=[{"value": phrase} for phrase in phrase_hints]
+        )
+        adaptation = cloud_speech.SpeechAdaptation(
+            phrase_sets=[
+                cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
+                    inline_phrase_set=phrase_set
+                )
+            ]
+        )
 
-    recognition_config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=audio_segment.frame_rate,
-        language_code=config.language_code,
-        use_enhanced=config.use_enhanced,
+    recognition_config = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        adaptation=adaptation,
+        language_codes=[config.language_code],
         model=config.model,
-        enable_word_time_offsets=True,
-        enable_automatic_punctuation=True,
-        enable_word_confidence=True,
-        audio_channel_count=audio_segment.channels,
-        enable_separate_recognition_per_channel=False,
-        metadata=metadata,
-        speech_contexts=speech_contexts,
+        features=cloud_speech.RecognitionFeatures(
+            enable_word_time_offsets=True,
+            enable_word_confidence=True,
+            enable_automatic_punctuation=True,
+        ),
     )
 
-    operation = speech_client.long_running_recognize(
+    request = cloud_speech.BatchRecognizeRequest(
+        recognizer=recognizer,
         config=recognition_config,
-        audio=speech.RecognitionAudio(uri=gcs_uri),
+        files=[cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)],
+        recognition_output_config=cloud_speech.RecognitionOutputConfig(
+            inline_response_config=cloud_speech.InlineOutputConfig(),
+        ),
     )
+    operation = speech_client.batch_recognize(request=request)
     response = operation.result(timeout=config.operation_timeout_seconds)
+    transcript = response.results[gcs_uri].transcript
 
     (
         transcript_text,
         transcript_path,
         text_panel_path,
         sentence_panel_path,
-    ) = write_google_transcript_outputs(response, result_dir)
+    ) = write_google_transcript_outputs(transcript, result_dir)
 
     return GoogleTranscriptionResult(
         transcript_text=transcript_text,
