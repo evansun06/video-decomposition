@@ -16,6 +16,22 @@ aggregation, cleaning, multi-file batching, SQLite status tracking, or a split
 upload/transcription pipeline. The current transcription path uses Google v2
 `BatchRecognize`, but still submits one audio file per call.
 
+## Project Goal
+
+The end state is to run this analysis pipeline on a Windows remote desktop that
+is physically connected to the NAS containing the source MP4 files. Development
+can happen on macOS, but production paths and write behavior must work from the
+Windows/NAS environment.
+
+The NAS is the source of truth for input video files. Two CSV files contain the
+exact NAS paths needed to retrieve the MP4s. Before the first full run, those CSV
+inputs should be diffed against the IDs that have already been analyzed. The
+remaining unanalyzed IDs can then seed the SQLite tracking database.
+
+The database should avoid storing Mac-only absolute paths as the only source of
+truth. Prefer storing video IDs plus paths relative to configured roots, or store
+the NAS path separately from machine-specific local/output roots.
+
 ## Layout
 
 ```text
@@ -244,3 +260,48 @@ work_dir/
 - Speech-to-Text IAM roles: https://docs.cloud.google.com/speech-to-text/v2/docs/iam
 - Service-account JSON keys: https://docs.cloud.google.com/iam/docs/keys-create-delete
 - Cloud Storage IAM roles: https://cloud.google.com/storage/docs/access-control/iam-roles
+
+## Roadmap
+
+1. Configure runtime paths for macOS development and Windows/NAS execution.
+   - Define input CSV locations, NAS video roots, output roots, and temporary
+     work roots.
+   - Confirm the Windows remote desktop can read NAS MP4 paths and write output
+     folders without path, permission, or file-locking issues.
+
+2. Diff the two NAS-path CSV inputs against already-analyzed IDs.
+   - Treat this as a one-time migration step.
+   - Produce the seed set of video IDs and NAS MP4 paths that still need
+     analysis.
+
+3. Add SQLite state tracking and seed it from the diff result.
+   - Track video ID, NAS source path, work/output paths, local decomposition
+     state, GCS upload state, batch operation name, transcript state, errors,
+     and timestamps.
+   - Use SQLite as the coordination layer between local decomposition and cloud
+     transcription.
+
+4. Split the code into two pipelines.
+   - Local pipeline: video from NAS -> audio files + sampled frames -> SQLite
+     state update.
+   - Transcript/GCP pipeline: pending audio -> GCS upload -> v2 batch
+     recognition -> transcript output files -> SQLite state update.
+
+5. Use Speech-to-Text v2 batch recognition properly.
+   - Group pending audio files into batches of up to 15 GCS URIs.
+   - Store submitted operation names in SQLite.
+   - Poll active cloud batch operations separately from local decomposition.
+   - Materialize `script_google.txt`, `text_panel_google.csv`, and
+     `google_sentence_panel.csv` when operations complete.
+
+6. Configure GCP and billing for the production run.
+   - Enable the required APIs, create/select the bucket, configure service
+     account access, and set credentials on the Windows remote desktop.
+   - Keep credential JSON out of git and environment-specific config.
+
+7. Add smoke tests.
+   - Include or point to one small MP4 fixture in a local smoke-test directory.
+   - Test helper functions for transcript output generation, env parsing, and
+     SQLite state transitions.
+   - Run one end-to-end smoke test on the Windows/NAS environment before the
+     full analysis run.

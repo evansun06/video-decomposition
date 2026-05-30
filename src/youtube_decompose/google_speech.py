@@ -233,6 +233,7 @@ def transcribe_audio_with_google(
     gcs_uri = upload_audio_to_gcs(audio_path, config)
     recognizer = build_recognizer_name(config)
 
+    # Transcription Biases towards X topics eg (personal finance)
     phrase_hints = [
         phrase for phrase in config.speech_context_phrases if phrase.strip()
     ]
