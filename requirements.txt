@@ -1,0 +1,7 @@
+    google-cloud-speech>=2.34.0
+    google-cloud-storage>=2.10.0
+    imageio-ffmpeg>=0.6.0
+    moviepy>=1.0.3
+    pliers>=0.4.2
+    pydub>=0.25.1
+    tqdm>=4.67.0
