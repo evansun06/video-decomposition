@@ -237,6 +237,36 @@ result = decompose_video(
 )
 ```
 
+For separated one-video stage execution with SQLite status updates:
+
+```python
+from pathlib import Path
+
+from youtube_decompose import (
+    GoogleSpeechConfig,
+    run_audio_stage_for_video,
+    run_image_stage_for_video,
+    run_transcription_stage_for_video,
+)
+
+db_path = Path("job_state/video_state.sqlite")
+output_root = Path(r"D:\youtube_analysis_output")
+
+run_audio_stage_for_video("--B5nAoQVTI", db_path=db_path, output_root=output_root)
+run_transcription_stage_for_video(
+    "--B5nAoQVTI",
+    google_config=GoogleSpeechConfig.from_env(),
+    db_path=db_path,
+    output_root=output_root,
+)
+run_image_stage_for_video("--B5nAoQVTI", db_path=db_path, output_root=output_root)
+```
+
+`YOUTUBE_DECOMPOSE_OUTPUT_ROOT` can also set the default output root. Each stage
+uses the seeded `videos.nas_path` as the input path and writes outputs under
+`output_root / video_id`, preserving `audio_temp/`, `result_temp/`, and
+`image_temp/`.
+
 ## Output
 
 ```text

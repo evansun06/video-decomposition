@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 from typing import Any
+
+
+DEFAULT_OUTPUT_ROOT = Path(
+    os.environ.get("YOUTUBE_DECOMPOSE_OUTPUT_ROOT", "analysis_output")
+)
 
 
 @dataclass(frozen=True)
