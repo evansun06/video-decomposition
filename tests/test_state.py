@@ -27,7 +27,14 @@ from youtube_decompose.poll_transcription_batches import (
     main as poll_batches_main,
     poll_transcription_batches,
 )
+from youtube_decompose.submit_audio_extraction import (
+    main as audio_submit_main,
+    submit_audio_extraction,
+)
+from youtube_decompose.submit_gcp_stt_batches import submit_gcp_stt_batches
+from youtube_decompose.submit_image_decomposition import submit_image_decomposition
 from youtube_decompose.google_speech import GoogleTranscriptionResult
+from youtube_decompose.config import GoogleSpeechConfig
 from youtube_decompose.job_state.util import (
     non_latin_title_ratio,
     should_exclude_title,
@@ -625,6 +632,343 @@ class StagePipelineTests(unittest.TestCase):
                 )
 
 
+class SubmissionScriptTests(unittest.TestCase):
+    def _seed_videos(
+        self,
+        temp_path: Path,
+        video_ids: list[str],
+    ) -> tuple[Path, Path]:
+        csv_path = temp_path / "v11.csv"
+        db_path = temp_path / "state.sqlite"
+        output_root = temp_path / "output"
+        write_csv(csv_path, [video_row(video_id) for video_id in video_ids])
+        init_database(csv_path=csv_path, db_path=db_path)
+        return db_path, output_root
+
+    def test_audio_submit_limit_one_processes_one_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b"])
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                summary = submit_audio_extraction(
+                    db_path=db_path,
+                    output_root=output_root,
+                    limit=1,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, audio_status, audio_output_path
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 1)
+            self.assertEqual(summary.succeeded, 1)
+            self.assertEqual(rows[0][0:2], ("a", "done"))
+            self.assertEqual(rows[1][0:2], ("b", "queued"))
+            self.assertEqual(
+                rows[0][2],
+                str(output_root / "a" / "audio_temp" / "audio_full.wav"),
+            )
+
+    def test_audio_submit_without_limit_processes_all_eligible_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b", "c"])
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                summary = submit_audio_extraction(
+                    db_path=db_path,
+                    output_root=output_root,
+                    workers=2,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                statuses = connection.execute(
+                    """
+                    SELECT audio_status, COUNT(*)
+                    FROM videos
+                    GROUP BY audio_status
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 3)
+            self.assertEqual(summary.succeeded, 3)
+            self.assertEqual(statuses, [("done", 3)])
+
+    def test_image_submit_uses_frame_rate_and_video_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a"])
+
+            def fake_convert(video_path: str, work_dir: Path, frame_rate: int) -> int:
+                self.assertEqual(frame_rate, 7)
+                image_dir = Path(work_dir) / "image_temp"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                (image_dir / "image_split-1.png").write_bytes(b"png")
+                return 1
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_images",
+                side_effect=fake_convert,
+            ):
+                summary = submit_image_decomposition(
+                    db_path=db_path,
+                    output_root=output_root,
+                    frame_rate=7,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT image_status, image_output_dir, frame_count
+                    FROM videos
+                    WHERE video_id = 'a'
+                    """
+                ).fetchone()
+
+            self.assertEqual(summary.selected, 1)
+            self.assertEqual(row, ("done", str(output_root / "a" / "image_temp"), 1))
+
+    def test_audio_submit_cli_log_file_includes_video_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a"])
+            log_path = temp_path / "submit.log"
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                exit_code = audio_submit_main(
+                    [
+                        "--db",
+                        str(db_path),
+                        "--output-root",
+                        str(output_root),
+                        "--limit",
+                        "1",
+                        "--log-file",
+                        str(log_path),
+                    ]
+                )
+
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertEqual(exit_code, 0)
+            self.assertIn("video_id=a", log_text)
+            self.assertIn("Reading source video", log_text)
+
+
+class SttSubmissionTests(unittest.TestCase):
+    def _seed_audio_done(
+        self,
+        temp_path: Path,
+        video_ids: list[str],
+        *,
+        missing_audio_ids: set[str] | None = None,
+    ) -> tuple[Path, Path]:
+        missing_audio_ids = missing_audio_ids or set()
+        csv_path = temp_path / "v11.csv"
+        db_path = temp_path / "state.sqlite"
+        output_root = temp_path / "output"
+        write_csv(csv_path, [video_row(video_id) for video_id in video_ids])
+        init_database(csv_path=csv_path, db_path=db_path)
+
+        with sqlite3.connect(db_path) as connection:
+            for video_id in video_ids:
+                audio_path = output_root / video_id / "audio_temp" / "audio_full.wav"
+                if video_id not in missing_audio_ids:
+                    audio_path.parent.mkdir(parents=True, exist_ok=True)
+                    audio_path.write_bytes(b"wav")
+                connection.execute(
+                    """
+                    UPDATE videos
+                    SET
+                        audio_status = 'done',
+                        audio_output_path = ?,
+                        transcription_status = 'queued'
+                    WHERE video_id = ?
+                    """,
+                    (str(audio_path), video_id),
+                )
+            connection.commit()
+
+        return db_path, output_root
+
+    def test_stt_submit_upgrades_schema_and_records_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_audio_done(temp_path, ["a"])
+
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("DROP TABLE transcription_batches")
+                connection.commit()
+
+            def fake_upload(
+                audio_path: Path,
+                config: GoogleSpeechConfig,
+                object_name: str | None = None,
+            ) -> str:
+                return f"gs://bucket/{object_name}"
+
+            submitted: list[tuple[tuple[str, ...], str]] = []
+
+            def fake_submit(gcs_uris: tuple[str, ...], output_uri: str) -> str:
+                submitted.append((gcs_uris, output_uri))
+                return "operations/abc"
+
+            summary = submit_gcp_stt_batches(
+                db_path=db_path,
+                output_root=output_root,
+                batch_size=1,
+                google_config=GoogleSpeechConfig(
+                    bucket_name="bucket",
+                    project_id="project",
+                ),
+                upload_func=fake_upload,
+                batch_submitter=fake_submit,
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                batch = connection.execute(
+                    """
+                    SELECT operation_name, status, gcs_uris_json
+                    FROM transcription_batches
+                    """
+                ).fetchone()
+                video = connection.execute(
+                    """
+                    SELECT transcription_status, transcription_batch_id, gcs_uri
+                    FROM videos
+                    WHERE video_id = 'a'
+                    """
+                ).fetchone()
+
+            self.assertEqual(summary.batches_submitted, 1)
+            self.assertEqual(batch[0:2], ("operations/abc", "submitted"))
+            self.assertEqual(json.loads(batch[2]), [video[2]])
+            self.assertEqual(video[0], "running")
+            self.assertIsNotNone(video[1])
+            self.assertTrue(video[2].startswith("gs://bucket/a_audio_full_"))
+            self.assertEqual(len(submitted), 1)
+            self.assertTrue(submitted[0][1].startswith("gs://bucket/stt_results/"))
+
+    def test_stt_submit_chunks_uploaded_audio_by_batch_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_audio_done(temp_path, ["a", "b", "c"])
+
+            def fake_upload(
+                audio_path: Path,
+                config: GoogleSpeechConfig,
+                object_name: str | None = None,
+            ) -> str:
+                return f"gs://bucket/{object_name}"
+
+            submitted: list[tuple[str, ...]] = []
+
+            def fake_submit(gcs_uris: tuple[str, ...], output_uri: str) -> str:
+                submitted.append(gcs_uris)
+                return f"operations/{len(submitted)}"
+
+            summary = submit_gcp_stt_batches(
+                db_path=db_path,
+                output_root=output_root,
+                batch_size=2,
+                google_config=GoogleSpeechConfig(
+                    bucket_name="bucket",
+                    project_id="project",
+                ),
+                upload_func=fake_upload,
+                batch_submitter=fake_submit,
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                batch_count = connection.execute(
+                    "SELECT COUNT(*) FROM transcription_batches"
+                ).fetchone()[0]
+
+            self.assertEqual(summary.selected, 3)
+            self.assertEqual(summary.batches_submitted, 2)
+            self.assertEqual([len(batch) for batch in submitted], [2, 1])
+            self.assertEqual(batch_count, 2)
+
+    def test_stt_submit_missing_audio_marks_only_that_video_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_audio_done(
+                temp_path,
+                ["a", "b"],
+                missing_audio_ids={"b"},
+            )
+
+            def fake_upload(
+                audio_path: Path,
+                config: GoogleSpeechConfig,
+                object_name: str | None = None,
+            ) -> str:
+                return f"gs://bucket/{object_name}"
+
+            summary = submit_gcp_stt_batches(
+                db_path=db_path,
+                output_root=output_root,
+                batch_size=2,
+                google_config=GoogleSpeechConfig(
+                    bucket_name="bucket",
+                    project_id="project",
+                ),
+                upload_func=fake_upload,
+                batch_submitter=lambda _uris, _output_uri: "operations/abc",
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, transcription_status, transcription_error
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.upload_failed, 1)
+            self.assertEqual(rows[0], ("a", "running", None))
+            self.assertEqual(rows[1][0:2], ("b", "failed"))
+            self.assertIn("Audio output does not exist", rows[1][2])
+
+
 def fake_transcript(*words: str) -> SimpleNamespace:
     word_infos = []
     for index, word in enumerate(words):
@@ -871,6 +1215,50 @@ class BatchPollingTests(unittest.TestCase):
             self.assertEqual(batch, ("done", None))
             self.assertEqual(rows[0], ("a", "done", None))
             self.assertEqual(rows[1], ("b", "failed", "bad audio"))
+
+    def test_completed_gcs_output_batch_downloads_and_writes_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            gcs_uri = "gs://bucket/a.wav"
+            db_path, output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a"],
+                gcs_uris=[gcs_uri],
+            )
+            response = SimpleNamespace(
+                results={
+                    gcs_uri: SimpleNamespace(uri="gs://bucket/results/a.json"),
+                }
+            )
+
+            with patch(
+                "youtube_decompose.poll_transcription_batches."
+                "download_google_batch_results_from_gcs",
+                return_value=fake_transcript("from", "gcs."),
+            ) as download_results:
+                summary = poll_transcription_batches(
+                    db_path=db_path,
+                    output_root=output_root,
+                    google_config=GoogleSpeechConfig(
+                        bucket_name="bucket",
+                        project_id="project",
+                    ),
+                    operation_getter=lambda _name: fake_operation(response=response),
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT transcription_status, transcript_path
+                    FROM videos
+                    WHERE video_id = 'a'
+                    """
+                ).fetchone()
+
+            self.assertEqual(summary.done_videos, 1)
+            self.assertEqual(row[0], "done")
+            self.assertEqual(Path(row[1]).read_text(encoding="utf-8"), "from gcs.")
+            download_results.assert_called_once()
 
     def test_poller_cli_one_pass_exits_with_no_submitted_batches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -12,11 +12,11 @@ It can:
 - write the original transcript outputs to `result_temp/`
 
 It intentionally does **not** include Face++, DeepFace, speech emotion,
-aggregation, cleaning, or production batch submission. The current one-video
-transcription helper uses Google v2 `BatchRecognize` with one audio file per
-call. The SQLite schema and poller can also track already-submitted multi-file
-Speech-to-Text batch operations and write per-video transcript outputs when
-those operations complete.
+aggregation, or cleaning. The current one-video transcription helper uses
+Google v2 `BatchRecognize` with one audio file per call. The SQLite-backed
+submission scripts can run local extraction and submit multi-file
+Speech-to-Text batch operations, while the poller writes per-video transcript
+outputs when those operations complete.
 
 ## Project Goal
 
@@ -271,19 +271,76 @@ uses the seeded `videos.nas_path` as the input path and writes outputs under
 `output_root / video_id`, preserving `audio_temp/`, `result_temp/`, and
 `image_temp/`.
 
+## Submission Scripts
+
+Set the NAS output root before running submission scripts:
+
+```bash
+export NASOUTPUTPATH="/path/to/nas/output"
+```
+
+Every submission script writes under:
+
+```text
+NASOUTPUTPATH/
+  video_id/
+    audio_temp/
+    image_temp/
+    result_temp/
+```
+
+Run one-video smoke tests with `--limit 1`; omit `--limit` to process every
+eligible SQLite row. `--workers` controls local parallelism, and every log line
+includes `video_id=...` so reads, writes, and failures can be traced to one
+video.
+
+Audio extraction:
+
+```bash
+python -m youtube_decompose.submit_audio_extraction \
+  --db job_state/video_state.sqlite \
+  --limit 1 \
+  --workers 2
+```
+
+Image decomposition:
+
+```bash
+python -m youtube_decompose.submit_image_decomposition \
+  --db job_state/video_state.sqlite \
+  --frame-rate 10 \
+  --limit 1 \
+  --workers 2
+```
+
+Submit extracted audio to Google Speech-to-Text batches:
+
+```bash
+python -m youtube_decompose.submit_gcp_stt_batches \
+  --db job_state/video_state.sqlite \
+  --batch-size 15 \
+  --limit 15 \
+  --workers 4
+```
+
+The STT submitter selects rows with `audio_status='done'` and
+`transcription_status='queued'`, uploads `audio_full.wav` to Cloud Storage,
+submits `BatchRecognize` operations, records `transcription_batches`, and marks
+included videos `running`. Use `--retry-failed` to include failed transcription
+rows in a later retry.
+
 ## Batch Transcription Polling
 
-Batch submission is intentionally not implemented yet. The poller expects a
-future submitter, or a manual smoke-test setup, to create one
-`transcription_batches` row and update the matching `videos` rows.
+The poller checks submitted Speech-to-Text operations and writes transcript
+outputs once Google completes them.
 
 The GCS URI lifecycle is:
 
 ```text
 local audio_temp/audio_full.wav
   -> upload to gs://bucket/object.wav
-  -> submit that URI in a Speech-to-Text BatchRecognize request
-  -> Google returns results keyed by the same URI
+  -> submit that URI in a Speech-to-Text BatchRecognize request with GCS output
+  -> Google returns result-object URIs keyed by input audio URI
   -> poller finds videos.gcs_uri and writes result_temp transcript files
 ```
 
@@ -303,20 +360,12 @@ transcription_batches (
 )
 ```
 
-The future submitter must:
-
-1. Upload each video audio file and store its URI in `videos.gcs_uri`.
-2. Submit one `BatchRecognize` operation with up to 15 GCS URIs.
-3. Insert a `transcription_batches` row with `status='submitted'`.
-4. Set each included video to `transcription_status='running'` and store
-   `videos.transcription_batch_id`.
-
 Poll submitted operations once:
 
 ```bash
 python -m youtube_decompose.poll_transcription_batches \
   --db job_state/video_state.sqlite \
-  --output-root analysis_output \
+  --output-root "$NASOUTPUTPATH" \
   --limit 50
 ```
 
@@ -382,7 +431,7 @@ work_dir/
    - Transcript/GCP pipeline: pending audio -> GCS upload -> v2 batch
      recognition -> transcript output files -> SQLite state update.
 
-5. Use Speech-to-Text v2 batch recognition properly. [polling done; submission pending]
+5. Use Speech-to-Text v2 batch recognition properly. [submitter and poller done]
    - Group pending audio files into batches of up to 15 GCS URIs.
    - Store submitted operation names in SQLite.
    - Poll active cloud batch operations separately from local decomposition.

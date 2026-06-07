@@ -9,8 +9,13 @@ from typing import Any, Callable, Sequence
 
 from .config import DEFAULT_OUTPUT_ROOT, GoogleSpeechConfig
 from .folders import setup_work_folder
-from .google_speech import build_google_credentials, write_google_transcript_outputs
+from .google_speech import (
+    build_google_credentials,
+    download_google_batch_results_from_gcs,
+    write_google_transcript_outputs,
+)
 from .job_state.state import DEFAULT_DB_PATH, StageStatus, ensure_database_schema
+from .submission import resolve_output_root
 
 
 OperationGetter = Callable[[str], Any]
@@ -33,8 +38,9 @@ def _utc_now_sql() -> str:
 
 
 def _connect(db_path: str | Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=30)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
     return connection
 
 
@@ -85,6 +91,22 @@ def _get_file_result(response: Any, gcs_uri: str) -> Any | None:
         return results[gcs_uri]
     except (KeyError, TypeError):
         return None
+
+
+def _transcript_from_file_result(
+    file_result: Any,
+    google_config: GoogleSpeechConfig | None,
+) -> Any | None:
+    transcript = getattr(file_result, "transcript", None)
+    if transcript is not None:
+        return transcript
+
+    output_uri = getattr(file_result, "uri", None)
+    if output_uri:
+        config = google_config or GoogleSpeechConfig.from_env()
+        return download_google_batch_results_from_gcs(str(output_uri), config)
+
+    return None
 
 
 def _default_operation_getter(config: GoogleSpeechConfig) -> OperationGetter:
@@ -283,6 +305,7 @@ def _materialize_batch(
     gcs_uris: list[str],
     response: Any,
     output_root: Path,
+    google_config: GoogleSpeechConfig | None,
 ) -> tuple[int, int]:
     done_videos = 0
     failed_videos = 0
@@ -328,7 +351,7 @@ def _materialize_batch(
             failed_videos += 1
             continue
 
-        transcript = getattr(file_result, "transcript", None)
+        transcript = _transcript_from_file_result(file_result, google_config)
         if transcript is None:
             _mark_video_failed(
                 connection,
@@ -433,6 +456,7 @@ def poll_transcription_batches(
                     gcs_uris=gcs_uris,
                     response=response,
                     output_root=output_root,
+                    google_config=google_config,
                 )
                 connection.commit()
             done_videos += batch_done
@@ -483,8 +507,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=DEFAULT_OUTPUT_ROOT,
-        help=f"Analysis output root. Defaults to {DEFAULT_OUTPUT_ROOT}.",
+        default=None,
+        help=(
+            "NAS output root. Defaults to $NASOUTPUTPATH. Completed transcript "
+            "files are written under this root by video_id."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -501,9 +528,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.limit < 1:
         parser.error("--limit must be at least 1.")
 
+    try:
+        output_root = resolve_output_root(args.output_root)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     summary = poll_transcription_batches(
         db_path=args.db,
-        output_root=args.output_root,
+        output_root=output_root,
         limit=args.limit,
     )
     _print_summary(summary)

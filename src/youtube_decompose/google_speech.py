@@ -58,6 +58,78 @@ def build_recognizer_name(config: GoogleSpeechConfig) -> str:
     )
 
 
+def build_google_recognition_config(config: GoogleSpeechConfig) -> Any:
+    """Build the Speech-to-Text v2 recognition config used by this pipeline."""
+
+    from google.cloud.speech_v2.types import cloud_speech
+
+    phrase_hints = [
+        phrase for phrase in config.speech_context_phrases if phrase.strip()
+    ]
+    adaptation = None
+    if phrase_hints:
+        phrase_set = cloud_speech.PhraseSet(
+            phrases=[{"value": phrase} for phrase in phrase_hints]
+        )
+        adaptation = cloud_speech.SpeechAdaptation(
+            phrase_sets=[
+                cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
+                    inline_phrase_set=phrase_set
+                )
+            ]
+        )
+
+    return cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        adaptation=adaptation,
+        language_codes=[config.language_code],
+        model=config.model,
+        features=cloud_speech.RecognitionFeatures(
+            enable_word_time_offsets=True,
+            enable_word_confidence=True,
+            enable_automatic_punctuation=True,
+        ),
+    )
+
+
+def build_batch_recognize_request(
+    *,
+    gcs_uris: list[str],
+    config: GoogleSpeechConfig,
+    gcs_output_uri: str | None = None,
+) -> Any:
+    """Build a Speech-to-Text v2 batch request for one or more GCS audio URIs."""
+
+    from google.cloud.speech_v2.types import cloud_speech
+
+    output_config_kwargs: dict[str, Any]
+    if gcs_output_uri is None:
+        if len(gcs_uris) != 1:
+            raise ValueError(
+                "Inline Speech-to-Text batch output is only supported for one "
+                "audio URI. Pass gcs_output_uri for multi-file batches."
+            )
+        output_config_kwargs = {
+            "inline_response_config": cloud_speech.InlineOutputConfig(),
+        }
+    else:
+        output_config_kwargs = {
+            "gcs_output_config": cloud_speech.GcsOutputConfig(uri=gcs_output_uri),
+        }
+
+    return cloud_speech.BatchRecognizeRequest(
+        recognizer=build_recognizer_name(config),
+        config=build_google_recognition_config(config),
+        files=[
+            cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)
+            for gcs_uri in gcs_uris
+        ],
+        recognition_output_config=cloud_speech.RecognitionOutputConfig(
+            **output_config_kwargs,
+        ),
+    )
+
+
 def generate_unique_filename(base_name: str) -> str:
     """Generate a unique object name for GCS uploads."""
 
@@ -95,6 +167,40 @@ def upload_audio_to_gcs(
     blob.upload_from_filename(str(audio_path))
 
     return f"gs://{config.bucket_name}/{object_name}"
+
+
+def split_gcs_uri(gcs_uri: str) -> tuple[str, str]:
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError(f"Expected a gs:// URI, found: {gcs_uri}")
+
+    bucket_name, separator, object_name = gcs_uri[5:].partition("/")
+    if not bucket_name or not separator or not object_name:
+        raise ValueError(f"Expected a gs://bucket/object URI, found: {gcs_uri}")
+
+    return bucket_name, object_name
+
+
+def download_google_batch_results_from_gcs(
+    gcs_uri: str,
+    config: GoogleSpeechConfig,
+) -> Any:
+    """Download a GCS BatchRecognizeResults JSON object and parse it."""
+
+    from google.cloud import storage
+    from google.cloud.speech_v2.types import cloud_speech
+
+    bucket_name, object_name = split_gcs_uri(gcs_uri)
+    credentials = build_google_credentials(config)
+    storage_client = storage.Client(
+        project=config.project_id,
+        credentials=credentials,
+    )
+    blob = storage_client.bucket(bucket_name).blob(object_name)
+    results_bytes = blob.download_as_bytes()
+    return cloud_speech.BatchRecognizeResults.from_json(
+        results_bytes,
+        ignore_unknown_fields=True,
+    )
 
 
 def _duration_seconds(value: Any) -> float:
@@ -222,7 +328,6 @@ def transcribe_audio_with_google(
     """Transcribe a local WAV file via Google Speech-to-Text v2 batch recognize."""
 
     from google.cloud.speech_v2 import SpeechClient
-    from google.cloud.speech_v2.types import cloud_speech
 
     audio_path = Path(audio_path)
     result_dir = Path(result_dir)
@@ -231,44 +336,9 @@ def transcribe_audio_with_google(
     credentials = build_google_credentials(config)
     speech_client = SpeechClient(credentials=credentials)
     gcs_uri = upload_audio_to_gcs(audio_path, config)
-    recognizer = build_recognizer_name(config)
-
-    # Transcription Biases towards X topics eg (personal finance)
-    phrase_hints = [
-        phrase for phrase in config.speech_context_phrases if phrase.strip()
-    ]
-    adaptation = None
-    if phrase_hints:
-        phrase_set = cloud_speech.PhraseSet(
-            phrases=[{"value": phrase} for phrase in phrase_hints]
-        )
-        adaptation = cloud_speech.SpeechAdaptation(
-            phrase_sets=[
-                cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
-                    inline_phrase_set=phrase_set
-                )
-            ]
-        )
-
-    recognition_config = cloud_speech.RecognitionConfig(
-        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-        adaptation=adaptation,
-        language_codes=[config.language_code],
-        model=config.model,
-        features=cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=True,
-            enable_word_confidence=True,
-            enable_automatic_punctuation=True,
-        ),
-    )
-
-    request = cloud_speech.BatchRecognizeRequest(
-        recognizer=recognizer,
-        config=recognition_config,
-        files=[cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)],
-        recognition_output_config=cloud_speech.RecognitionOutputConfig(
-            inline_response_config=cloud_speech.InlineOutputConfig(),
-        ),
+    request = build_batch_recognize_request(
+        gcs_uris=[gcs_uri],
+        config=config,
     )
     operation = speech_client.batch_recognize(request=request)
     response = operation.result(timeout=config.operation_timeout_seconds)
