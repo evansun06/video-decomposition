@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import json
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -18,7 +20,12 @@ import youtube_decompose.state as legacy_state
 from youtube_decompose.job_state.state import (
     DEFAULT_DB_PATH,
     SCHEMA_VERSION,
+    ensure_database_schema,
     init_database,
+)
+from youtube_decompose.poll_transcription_batches import (
+    main as poll_batches_main,
+    poll_transcription_batches,
 )
 from youtube_decompose.google_speech import GoogleTranscriptionResult
 from youtube_decompose.job_state.util import (
@@ -257,6 +264,75 @@ class StateDatabaseTests(unittest.TestCase):
 
             self.assertIsNone(old_table)
             self.assertEqual(video_count, 1)
+
+    def test_init_database_creates_batch_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_path = temp_path / "v11.csv"
+            db_path = temp_path / "state.sqlite"
+            write_csv(csv_path, [video_row("one")])
+
+            init_database(csv_path=csv_path, db_path=db_path)
+
+            with sqlite3.connect(db_path) as connection:
+                video_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(videos)")
+                }
+                batch_table = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'transcription_batches'
+                    """
+                ).fetchone()
+                metadata = connection.execute(
+                    "SELECT schema_version FROM state_metadata WHERE id = 1"
+                ).fetchone()
+
+            self.assertIn("transcription_batch_id", video_columns)
+            self.assertIsNotNone(batch_table)
+            self.assertEqual(metadata[0], SCHEMA_VERSION)
+
+    def test_ensure_database_schema_upgrades_existing_db(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "state.sqlite"
+            with sqlite3.connect(db_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE videos (
+                        video_id TEXT PRIMARY KEY,
+                        gcs_uri TEXT
+                    );
+                    CREATE TABLE state_metadata (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        schema_version INTEGER NOT NULL
+                    );
+                    INSERT INTO state_metadata (id, schema_version) VALUES (1, 2);
+                    """
+                )
+                connection.commit()
+
+            ensure_database_schema(db_path)
+            ensure_database_schema(db_path)
+
+            with sqlite3.connect(db_path) as connection:
+                video_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(videos)")
+                }
+                batch_table = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'transcription_batches'
+                    """
+                ).fetchone()
+                metadata = connection.execute(
+                    "SELECT schema_version FROM state_metadata WHERE id = 1"
+                ).fetchone()
+
+            self.assertIn("transcription_batch_id", video_columns)
+            self.assertIsNotNone(batch_table)
+            self.assertEqual(metadata[0], SCHEMA_VERSION)
 
 
 class StagePipelineTests(unittest.TestCase):
@@ -547,6 +623,276 @@ class StagePipelineTests(unittest.TestCase):
                     db_path=db_path,
                     output_root=output_root,
                 )
+
+
+def fake_transcript(*words: str) -> SimpleNamespace:
+    word_infos = []
+    for index, word in enumerate(words):
+        word_infos.append(
+            SimpleNamespace(
+                word=word,
+                start_offset=SimpleNamespace(seconds=index, nanos=0),
+                end_offset=SimpleNamespace(seconds=index + 1, nanos=0),
+            )
+        )
+    return SimpleNamespace(
+        results=[
+            SimpleNamespace(
+                alternatives=[
+                    SimpleNamespace(
+                        words=word_infos,
+                    )
+                ]
+            )
+        ]
+    )
+
+
+def fake_operation(
+    *,
+    done: bool = True,
+    response: object | None = None,
+    error: object | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(done=done, response=response, error=error)
+
+
+class BatchPollingTests(unittest.TestCase):
+    def _seed_batch(
+        self,
+        temp_path: Path,
+        *,
+        video_ids: list[str],
+        gcs_uris: list[str],
+    ) -> tuple[Path, Path]:
+        csv_path = temp_path / "v11.csv"
+        db_path = temp_path / "state.sqlite"
+        output_root = temp_path / "output"
+        write_csv(csv_path, [video_row(video_id) for video_id in video_ids])
+        init_database(csv_path=csv_path, db_path=db_path)
+
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO transcription_batches (
+                    batch_id,
+                    operation_name,
+                    status,
+                    gcs_uris_json,
+                    submitted_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    'batch-1',
+                    'operations/abc',
+                    'submitted',
+                    ?,
+                    '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00'
+                )
+                """,
+                (json.dumps(gcs_uris),),
+            )
+            for video_id, gcs_uri in zip(video_ids, gcs_uris):
+                connection.execute(
+                    """
+                    UPDATE videos
+                    SET
+                        audio_status = 'done',
+                        transcription_status = 'running',
+                        transcription_batch_id = 'batch-1',
+                        gcs_uri = ?
+                    WHERE video_id = ?
+                    """,
+                    (gcs_uri, video_id),
+                )
+            connection.commit()
+
+        return db_path, output_root
+
+    def test_completed_batch_writes_outputs_and_marks_done(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            gcs_uris = ["gs://bucket/a.wav", "gs://bucket/b.wav"]
+            db_path, output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a", "b"],
+                gcs_uris=gcs_uris,
+            )
+            response = SimpleNamespace(
+                results={
+                    gcs_uris[0]: SimpleNamespace(
+                        transcript=fake_transcript("hello", "world.")
+                    ),
+                    gcs_uris[1]: SimpleNamespace(
+                        transcript=fake_transcript("second", "video.")
+                    ),
+                }
+            )
+
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=lambda _name: fake_operation(response=response),
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        video_id,
+                        transcription_status,
+                        transcript_path,
+                        text_panel_path,
+                        sentence_panel_path,
+                        transcription_error
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+
+            self.assertEqual(summary.done_batches, 1)
+            self.assertEqual(summary.done_videos, 2)
+            self.assertEqual(summary.failed_videos, 0)
+            self.assertEqual(batch, ("done", None))
+            for row in rows:
+                self.assertEqual(row[1], "done")
+                self.assertIsNone(row[5])
+                self.assertTrue(Path(row[2]).exists())
+                self.assertTrue(Path(row[3]).exists())
+                self.assertTrue(Path(row[4]).exists())
+
+    def test_incomplete_batch_stays_submitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, _output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a"],
+                gcs_uris=["gs://bucket/a.wav"],
+            )
+
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=temp_path / "output",
+                operation_getter=lambda _name: fake_operation(done=False),
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+                video = connection.execute(
+                    "SELECT transcription_status FROM videos WHERE video_id = 'a'"
+                ).fetchone()
+
+            self.assertEqual(summary.pending_batches, 1)
+            self.assertEqual(batch, ("submitted", None))
+            self.assertEqual(video[0], "running")
+
+    def test_batch_level_error_marks_batch_and_video_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a"],
+                gcs_uris=["gs://bucket/a.wav"],
+            )
+            error = SimpleNamespace(code=13, message="operation failed")
+
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=lambda _name: fake_operation(error=error),
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+                video = connection.execute(
+                    """
+                    SELECT transcription_status, transcription_error
+                    FROM videos
+                    WHERE video_id = 'a'
+                    """
+                ).fetchone()
+
+            self.assertEqual(summary.failed_batches, 1)
+            self.assertEqual(summary.failed_videos, 1)
+            self.assertEqual(batch, ("failed", "operation failed"))
+            self.assertEqual(video, ("failed", "operation failed"))
+
+    def test_file_level_error_marks_only_that_video_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            gcs_uris = ["gs://bucket/a.wav", "gs://bucket/b.wav"]
+            db_path, output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a", "b"],
+                gcs_uris=gcs_uris,
+            )
+            response = SimpleNamespace(
+                results={
+                    gcs_uris[0]: SimpleNamespace(
+                        transcript=fake_transcript("hello.")
+                    ),
+                    gcs_uris[1]: SimpleNamespace(
+                        error=SimpleNamespace(code=3, message="bad audio")
+                    ),
+                }
+            )
+
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=lambda _name: fake_operation(response=response),
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, transcription_status, transcription_error
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+
+            self.assertEqual(summary.done_batches, 1)
+            self.assertEqual(summary.done_videos, 1)
+            self.assertEqual(summary.failed_videos, 1)
+            self.assertEqual(batch, ("done", None))
+            self.assertEqual(rows[0], ("a", "done", None))
+            self.assertEqual(rows[1], ("b", "failed", "bad audio"))
+
+    def test_poller_cli_one_pass_exits_with_no_submitted_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_path = temp_path / "v11.csv"
+            db_path = temp_path / "state.sqlite"
+            write_csv(csv_path, [video_row("a")])
+            init_database(csv_path=csv_path, db_path=db_path)
+
+            with patch("sys.stdout"):
+                exit_code = poll_batches_main(
+                    [
+                        "--db",
+                        str(db_path),
+                        "--output-root",
+                        str(temp_path / "output"),
+                        "--limit",
+                        "1",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":

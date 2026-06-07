@@ -21,7 +21,8 @@ from .util import (
 DEFAULT_CSV_PATH = Path("src/data/youtube_content_v11_20250612.csv")
 DEFAULT_DB_PATH = Path("job_state/video_state.sqlite")
 DEFAULT_MAX_DURATION_MINUTES = 30.0
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+BATCH_STATUS_VALUES = ("submitted", "done", "failed")
 
 REQUIRED_COLUMNS = {
     "id",
@@ -89,10 +90,12 @@ __all__ = [
     "DEFAULT_MAX_DURATION_MINUTES",
     "DEFAULT_MAX_NON_LATIN_TITLE_RATIO",
     "SCHEMA_VERSION",
+    "BATCH_STATUS_VALUES",
     "REQUIRED_COLUMNS",
     "SeedSummary",
     "StageStatus",
     "VideoSeed",
+    "ensure_database_schema",
     "init_database",
     "load_video_seeds",
     "main",
@@ -105,6 +108,17 @@ def _utc_now() -> str:
 
 def _status_values_sql() -> str:
     return ", ".join(f"'{status.value}'" for status in StageStatus)
+
+
+def _batch_status_values_sql() -> str:
+    return ", ".join(f"'{status}'" for status in BATCH_STATUS_VALUES)
+
+
+def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
 
 
 def _require_columns(fieldnames: Sequence[str] | None, csv_path: Path) -> None:
@@ -302,6 +316,7 @@ def load_video_seeds(
 
 def _create_schema(connection: sqlite3.Connection) -> None:
     status_values = _status_values_sql()
+    batch_status_values = _batch_status_values_sql()
     connection.executescript(
         f"""
         PRAGMA foreign_keys = ON;
@@ -336,6 +351,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             text_panel_path TEXT,
             sentence_panel_path TEXT,
             gcs_uri TEXT,
+            transcription_batch_id TEXT,
             transcription_attempts INTEGER NOT NULL DEFAULT 0
                 CHECK (transcription_attempts >= 0),
             transcription_started_at TEXT,
@@ -350,6 +366,24 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX idx_videos_image_status ON videos(image_status);
         CREATE INDEX idx_videos_transcription_status
             ON videos(transcription_status);
+        CREATE INDEX idx_videos_transcription_batch_id
+            ON videos(transcription_batch_id);
+        CREATE INDEX idx_videos_gcs_uri ON videos(gcs_uri);
+
+        CREATE TABLE transcription_batches (
+            batch_id TEXT PRIMARY KEY,
+            operation_name TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK (status IN ({batch_status_values})),
+            gcs_uris_json TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            finished_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_transcription_batches_status
+            ON transcription_batches(status);
 
         CREATE TABLE state_metadata (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -371,6 +405,70 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
+
+
+def ensure_database_schema(db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    """Apply additive schema updates needed by resumable pipeline workers."""
+
+    db_path = Path(db_path)
+    batch_status_values = _batch_status_values_sql()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+        video_columns = _table_columns(connection, "videos")
+        if "videos" not in {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }:
+            raise ValueError(f"SQLite DB does not contain videos table: {db_path}")
+
+        if "transcription_batch_id" not in video_columns:
+            connection.execute(
+                "ALTER TABLE videos ADD COLUMN transcription_batch_id TEXT"
+            )
+
+        connection.executescript(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_videos_transcription_batch_id
+                ON videos(transcription_batch_id);
+            CREATE INDEX IF NOT EXISTS idx_videos_gcs_uri ON videos(gcs_uri);
+
+            CREATE TABLE IF NOT EXISTS transcription_batches (
+                batch_id TEXT PRIMARY KEY,
+                operation_name TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL CHECK (status IN ({batch_status_values})),
+                gcs_uris_json TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                finished_at TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_transcription_batches_status
+                ON transcription_batches(status);
+            """
+        )
+
+        if "state_metadata" in {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }:
+            connection.execute(
+                """
+                UPDATE state_metadata
+                SET schema_version = ?
+                WHERE id = 1 AND schema_version < ?
+                """,
+                (SCHEMA_VERSION, SCHEMA_VERSION),
+            )
+
+        connection.commit()
 
 
 def _insert_seeds(

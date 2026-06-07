@@ -12,9 +12,11 @@ It can:
 - write the original transcript outputs to `result_temp/`
 
 It intentionally does **not** include Face++, DeepFace, speech emotion,
-aggregation, cleaning, multi-file batching, SQLite status tracking, or a split
-upload/transcription pipeline. The current transcription path uses Google v2
-`BatchRecognize`, but still submits one audio file per call.
+aggregation, cleaning, or production batch submission. The current one-video
+transcription helper uses Google v2 `BatchRecognize` with one audio file per
+call. The SQLite schema and poller can also track already-submitted multi-file
+Speech-to-Text batch operations and write per-video transcript outputs when
+those operations complete.
 
 ## Project Goal
 
@@ -43,8 +45,10 @@ migration/
     config.py
     folders.py
     google_speech.py
+    poll_transcription_batches.py
     media.py
     pipeline.py
+    job_state/
 ```
 
 ## Install
@@ -267,6 +271,68 @@ uses the seeded `videos.nas_path` as the input path and writes outputs under
 `output_root / video_id`, preserving `audio_temp/`, `result_temp/`, and
 `image_temp/`.
 
+## Batch Transcription Polling
+
+Batch submission is intentionally not implemented yet. The poller expects a
+future submitter, or a manual smoke-test setup, to create one
+`transcription_batches` row and update the matching `videos` rows.
+
+The GCS URI lifecycle is:
+
+```text
+local audio_temp/audio_full.wav
+  -> upload to gs://bucket/object.wav
+  -> submit that URI in a Speech-to-Text BatchRecognize request
+  -> Google returns results keyed by the same URI
+  -> poller finds videos.gcs_uri and writes result_temp transcript files
+```
+
+The minimal batch table is:
+
+```sql
+transcription_batches (
+    batch_id TEXT PRIMARY KEY,
+    operation_name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,          -- submitted, done, failed
+    gcs_uris_json TEXT NOT NULL,   -- JSON array of gs:// URIs
+    submitted_at TEXT NOT NULL,
+    finished_at TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+```
+
+The future submitter must:
+
+1. Upload each video audio file and store its URI in `videos.gcs_uri`.
+2. Submit one `BatchRecognize` operation with up to 15 GCS URIs.
+3. Insert a `transcription_batches` row with `status='submitted'`.
+4. Set each included video to `transcription_status='running'` and store
+   `videos.transcription_batch_id`.
+
+Poll submitted operations once:
+
+```bash
+python -m youtube_decompose.poll_transcription_batches \
+  --db job_state/video_state.sqlite \
+  --output-root analysis_output \
+  --limit 50
+```
+
+If a Google operation is still running, the batch remains `submitted`. If it is
+complete, the poller writes `script_google.txt`, `text_panel_google.csv`, and
+`google_sentence_panel.csv` under each video's `result_temp/`, then marks those
+videos and the batch `done`. File-level failures mark only that video `failed`;
+batch-level operation failures mark the batch and its unfinished videos
+`failed`.
+
+For smoke tests, use a small submitted batch and poll one operation:
+
+```bash
+python -m youtube_decompose.poll_transcription_batches --limit 1
+```
+
 ## Output
 
 ```text
@@ -304,10 +370,9 @@ work_dir/
    - Produce the seed set of video IDs and NAS MP4 paths that still need
      analysis.
 
-3. Add SQLite state tracking and seed it from the diff result.
+3. Add SQLite state tracking and seed it from the diff result. [partially done]
    - Track video ID, NAS source path, work/output paths, local decomposition
-     state, GCS upload state, batch operation name, transcript state, errors,
-     and timestamps.
+     state, GCS URI, batch ID, transcript state, errors, and timestamps.
    - Use SQLite as the coordination layer between local decomposition and cloud
      transcription.
 
@@ -317,11 +382,11 @@ work_dir/
    - Transcript/GCP pipeline: pending audio -> GCS upload -> v2 batch
      recognition -> transcript output files -> SQLite state update.
 
-5. Use Speech-to-Text v2 batch recognition properly.
+5. Use Speech-to-Text v2 batch recognition properly. [polling done; submission pending]
    - Group pending audio files into batches of up to 15 GCS URIs.
    - Store submitted operation names in SQLite.
    - Poll active cloud batch operations separately from local decomposition.
-   - Materialize `script_google.txt`, `text_panel_google.csv`, and
+   - Write `script_google.txt`, `text_panel_google.csv`, and
      `google_sentence_panel.csv` when operations complete.
 
 6. Configure GCP and billing for the production run.
