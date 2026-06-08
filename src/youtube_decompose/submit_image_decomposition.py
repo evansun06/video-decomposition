@@ -30,12 +30,17 @@ def submit_image_decomposition(
     limit: int | None = None,
     workers: int = 1,
     frame_rate: int = 10,
+    retry_failed: bool = False,
 ) -> WorkerSummary[int]:
     output_root = Path(output_root)
+    statuses = [StageStatus.QUEUED]
+    if retry_failed:
+        statuses.append(StageStatus.FAILED)
+
     candidates = fetch_stage_candidates(
         db_path=db_path,
         status_column="image_status",
-        statuses=(StageStatus.QUEUED,),
+        statuses=statuses,
         limit=limit,
     )
 
@@ -85,6 +90,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Sampled frames per second. Defaults to 10.",
     )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Include image_status='failed' rows as eligible work.",
+    )
     return parser
 
 
@@ -112,6 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         limit=args.limit,
         workers=args.workers,
         frame_rate=args.frame_rate,
+        retry_failed=args.retry_failed,
     )
     return 0 if summary.failed == 0 else 1
 

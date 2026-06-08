@@ -28,12 +28,17 @@ def submit_audio_extraction(
     output_root: str | Path,
     limit: int | None = None,
     workers: int = 1,
+    retry_failed: bool = False,
 ) -> WorkerSummary[Path]:
     output_root = Path(output_root)
+    statuses = [StageStatus.QUEUED]
+    if retry_failed:
+        statuses.append(StageStatus.FAILED)
+
     candidates = fetch_stage_candidates(
         db_path=db_path,
         status_column="audio_status",
-        statuses=(StageStatus.QUEUED,),
+        statuses=statuses,
         limit=limit,
     )
 
@@ -68,6 +73,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Submit queued SQLite videos for NAS audio extraction.",
     )
     add_common_arguments(parser)
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Include audio_status='failed' rows as eligible work.",
+    )
     return parser
 
 
@@ -94,6 +104,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=output_root,
         limit=args.limit,
         workers=args.workers,
+        retry_failed=args.retry_failed,
     )
     return 0 if summary.failed == 0 else 1
 

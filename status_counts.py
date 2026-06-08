@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Sequence
 
 
 DEFAULT_DB_PATH = Path("job_state/video_state.sqlite")
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+if SRC.exists() and str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from youtube_decompose.job_state.state import BATCH_STATUS_VALUES, StageStatus
 
 
 def table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -28,9 +35,10 @@ def status_counts(
     area: str,
     table_name: str,
     status_column: str,
+    statuses: Sequence[str] | None = None,
 ) -> list[tuple[str, str, int]]:
-    return [
-        (area, str(row[0]), int(row[1]))
+    counts = {
+        str(row[0]): int(row[1])
         for row in connection.execute(
             f"""
             SELECT {status_column}, COUNT(*)
@@ -39,7 +47,17 @@ def status_counts(
             ORDER BY {status_column}
             """
         ).fetchall()
-    ]
+    }
+    if statuses is None:
+        statuses = tuple(counts)
+
+    rows = [(area, status, counts.get(status, 0)) for status in statuses]
+    rows.extend(
+        (area, status, count)
+        for status, count in counts.items()
+        if status not in statuses
+    )
+    return rows
 
 
 def print_table(rows: list[tuple[str, str, int]]) -> None:
@@ -79,6 +97,7 @@ def build_rows(db_path: Path) -> list[tuple[str, str, int]]:
                 area="audio",
                 table_name="videos",
                 status_column="audio_status",
+                statuses=tuple(status.value for status in StageStatus),
             )
         )
         rows.extend(
@@ -87,6 +106,7 @@ def build_rows(db_path: Path) -> list[tuple[str, str, int]]:
                 area="image",
                 table_name="videos",
                 status_column="image_status",
+                statuses=tuple(status.value for status in StageStatus),
             )
         )
         rows.extend(
@@ -95,6 +115,7 @@ def build_rows(db_path: Path) -> list[tuple[str, str, int]]:
                 area="transcription",
                 table_name="videos",
                 status_column="transcription_status",
+                statuses=tuple(status.value for status in StageStatus),
             )
         )
 
@@ -105,6 +126,7 @@ def build_rows(db_path: Path) -> list[tuple[str, str, int]]:
                     area="stt_batch",
                     table_name="transcription_batches",
                     status_column="status",
+                    statuses=BATCH_STATUS_VALUES,
                 )
             )
 

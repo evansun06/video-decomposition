@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import youtube_decompose.state as legacy_state
+from status_counts import build_rows
 from youtube_decompose.job_state.state import (
     DEFAULT_DB_PATH,
     SCHEMA_VERSION,
@@ -721,6 +722,86 @@ class SubmissionScriptTests(unittest.TestCase):
             self.assertEqual(summary.succeeded, 3)
             self.assertEqual(statuses, [("done", 3)])
 
+    def test_audio_submit_retry_failed_includes_failed_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b"])
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET audio_status = 'failed' WHERE video_id = 'b'"
+                )
+                connection.commit()
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                summary = submit_audio_extraction(
+                    db_path=db_path,
+                    output_root=output_root,
+                    retry_failed=True,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, audio_status
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 2)
+            self.assertEqual(summary.succeeded, 2)
+            self.assertEqual(rows, [("a", "done"), ("b", "done")])
+
+    def test_audio_submit_without_retry_failed_skips_failed_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b"])
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET audio_status = 'failed' WHERE video_id = 'b'"
+                )
+                connection.commit()
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                summary = submit_audio_extraction(
+                    db_path=db_path,
+                    output_root=output_root,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, audio_status
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 1)
+            self.assertEqual(rows, [("a", "done"), ("b", "failed")])
+
     def test_image_submit_uses_frame_rate_and_video_output_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -756,6 +837,84 @@ class SubmissionScriptTests(unittest.TestCase):
             self.assertEqual(summary.selected, 1)
             self.assertEqual(row, ("done", str(output_root / "a" / "image_temp"), 1))
 
+    def test_image_submit_retry_failed_includes_failed_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b"])
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET image_status = 'failed' WHERE video_id = 'b'"
+                )
+                connection.commit()
+
+            def fake_convert(video_path: str, work_dir: Path, frame_rate: int) -> int:
+                image_dir = Path(work_dir) / "image_temp"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                (image_dir / "image_split-1.png").write_bytes(b"png")
+                return 1
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_images",
+                side_effect=fake_convert,
+            ):
+                summary = submit_image_decomposition(
+                    db_path=db_path,
+                    output_root=output_root,
+                    retry_failed=True,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, image_status
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 2)
+            self.assertEqual(summary.succeeded, 2)
+            self.assertEqual(rows, [("a", "done"), ("b", "done")])
+
+    def test_image_submit_without_retry_failed_skips_failed_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a", "b"])
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET image_status = 'failed' WHERE video_id = 'b'"
+                )
+                connection.commit()
+
+            def fake_convert(video_path: str, work_dir: Path, frame_rate: int) -> int:
+                image_dir = Path(work_dir) / "image_temp"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                (image_dir / "image_split-1.png").write_bytes(b"png")
+                return 1
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_images",
+                side_effect=fake_convert,
+            ):
+                summary = submit_image_decomposition(
+                    db_path=db_path,
+                    output_root=output_root,
+                    workers=1,
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, image_status
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 1)
+            self.assertEqual(rows, [("a", "done"), ("b", "failed")])
+
     def test_audio_submit_cli_log_file_includes_video_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -790,6 +949,66 @@ class SubmissionScriptTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("video_id=a", log_text)
             self.assertIn("Reading source video", log_text)
+
+    def test_audio_submit_cli_retry_failed_includes_failed_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_videos(temp_path, ["a"])
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET audio_status = 'failed' WHERE video_id = 'a'"
+                )
+                connection.commit()
+
+            def fake_convert(video_path: str, work_dir: Path) -> Path:
+                audio_dir = Path(work_dir) / "audio_temp"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+                audio_path = audio_dir / "audio_full.wav"
+                audio_path.write_bytes(b"wav")
+                return audio_path
+
+            with patch(
+                "youtube_decompose.stages.convert_video_to_audio",
+                side_effect=fake_convert,
+            ):
+                exit_code = audio_submit_main(
+                    [
+                        "--db",
+                        str(db_path),
+                        "--output-root",
+                        str(output_root),
+                        "--retry-failed",
+                    ]
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                status = connection.execute(
+                    "SELECT audio_status FROM videos WHERE video_id = 'a'"
+                ).fetchone()[0]
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(status, "done")
+
+
+class StatusCountsTests(unittest.TestCase):
+    def test_build_rows_includes_zero_count_video_and_batch_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_path = temp_path / "v11.csv"
+            db_path = temp_path / "state.sqlite"
+            write_csv(csv_path, [video_row("a")])
+            init_database(csv_path=csv_path, db_path=db_path)
+
+            rows = build_rows(db_path)
+
+        self.assertIn(("audio", "queued", 1), rows)
+        self.assertIn(("audio", "done", 0), rows)
+        self.assertIn(("image", "failed", 0), rows)
+        self.assertIn(("transcription", "waiting_audio", 1), rows)
+        self.assertIn(("transcription", "queued", 0), rows)
+        self.assertIn(("stt_batch", "submitted", 0), rows)
+        self.assertIn(("stt_batch", "done", 0), rows)
+        self.assertIn(("stt_batch", "failed", 0), rows)
 
 
 class SttSubmissionTests(unittest.TestCase):
