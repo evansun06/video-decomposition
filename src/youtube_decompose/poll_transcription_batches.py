@@ -464,14 +464,17 @@ def poll_transcription_batches(
             done_batches += 1
         except Exception as exc:
             with _connect(db_path) as connection:
-                _mark_batch_failed(
-                    connection,
-                    batch_id=batch_id,
-                    error=str(exc),
-                    now=_utc_now_sql(),
+                connection.execute(
+                    """
+                    UPDATE transcription_batches
+                    SET
+                        error = ?,
+                        updated_at = ?
+                    WHERE batch_id = ?
+                    """,
+                    (str(exc), _utc_now_sql(), batch_id),
                 )
                 connection.commit()
-            failed_batches += 1
             raise
 
     return PollSummary(

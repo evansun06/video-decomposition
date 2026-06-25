@@ -30,8 +30,8 @@ from .submission import (
 
 
 LOGGER_NAME = "youtube_decompose.submit_gcp_stt_batches"
-MAX_BATCH_SIZE = 15
-DEFAULT_BATCH_SIZE = 15
+MAX_BATCH_SIZE = 5
+DEFAULT_BATCH_SIZE = 5
 
 
 UploadFunc = Callable[[str | Path, GoogleSpeechConfig, str | None], str]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import sqlite3
@@ -32,7 +33,10 @@ from youtube_decompose.submit_audio_extraction import (
     main as audio_submit_main,
     submit_audio_extraction,
 )
-from youtube_decompose.submit_gcp_stt_batches import submit_gcp_stt_batches
+from youtube_decompose.submit_gcp_stt_batches import (
+    batch_size as parse_stt_batch_size,
+    submit_gcp_stt_batches,
+)
 from youtube_decompose.submit_image_decomposition import submit_image_decomposition
 from youtube_decompose.google_speech import GoogleTranscriptionResult
 from youtube_decompose.config import GoogleSpeechConfig
@@ -1012,6 +1016,10 @@ class StatusCountsTests(unittest.TestCase):
 
 
 class SttSubmissionTests(unittest.TestCase):
+    def test_stt_submit_rejects_batch_size_above_google_limit(self) -> None:
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "at most 5"):
+            parse_stt_batch_size("6")
+
     def _seed_audio_done(
         self,
         temp_path: Path,
@@ -1330,6 +1338,39 @@ class BatchPollingTests(unittest.TestCase):
                 self.assertTrue(Path(row[3]).exists())
                 self.assertTrue(Path(row[4]).exists())
 
+    def test_repoll_completed_batch_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            gcs_uri = "gs://bucket/a.wav"
+            db_path, output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a"],
+                gcs_uris=[gcs_uri],
+            )
+            response = SimpleNamespace(
+                results={
+                    gcs_uri: SimpleNamespace(transcript=fake_transcript("hello."))
+                }
+            )
+
+            poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=lambda _name: fake_operation(response=response),
+            )
+
+            def fail_if_called(_name: str) -> SimpleNamespace:
+                raise AssertionError("completed batches should not be polled again")
+
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=fail_if_called,
+            )
+
+            self.assertEqual(summary.checked_batches, 0)
+            self.assertEqual(summary.done_videos, 0)
+
     def test_incomplete_batch_stays_submitted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -1356,6 +1397,62 @@ class BatchPollingTests(unittest.TestCase):
             self.assertEqual(summary.pending_batches, 1)
             self.assertEqual(batch, ("submitted", None))
             self.assertEqual(video[0], "running")
+
+    def test_materialization_error_keeps_batch_submitted_for_repoll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            output_root = temp_path / "output"
+            output_root.write_text("not a directory", encoding="utf-8")
+            gcs_uri = "gs://bucket/a.wav"
+            db_path, _output_root = self._seed_batch(
+                temp_path,
+                video_ids=["a"],
+                gcs_uris=[gcs_uri],
+            )
+            response = SimpleNamespace(
+                results={
+                    gcs_uri: SimpleNamespace(transcript=fake_transcript("hello."))
+                }
+            )
+
+            with self.assertRaises(OSError):
+                poll_transcription_batches(
+                    db_path=db_path,
+                    output_root=output_root,
+                    operation_getter=lambda _name: fake_operation(response=response),
+                )
+
+            with sqlite3.connect(db_path) as connection:
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+                video = connection.execute(
+                    "SELECT transcription_status FROM videos WHERE video_id = 'a'"
+                ).fetchone()
+
+            self.assertEqual(batch[0], "submitted")
+            self.assertIsNotNone(batch[1])
+            self.assertEqual(video[0], "running")
+
+            output_root.unlink()
+            summary = poll_transcription_batches(
+                db_path=db_path,
+                output_root=output_root,
+                operation_getter=lambda _name: fake_operation(response=response),
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                batch = connection.execute(
+                    "SELECT status, error FROM transcription_batches"
+                ).fetchone()
+                video = connection.execute(
+                    "SELECT transcription_status FROM videos WHERE video_id = 'a'"
+                ).fetchone()
+
+            self.assertEqual(summary.done_batches, 1)
+            self.assertEqual(summary.done_videos, 1)
+            self.assertEqual(batch, ("done", None))
+            self.assertEqual(video[0], "done")
 
     def test_batch_level_error_marks_batch_and_video_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

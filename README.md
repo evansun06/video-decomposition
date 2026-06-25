@@ -318,8 +318,8 @@ Submit extracted audio to Google Speech-to-Text batches:
 ```bash
 python -m youtube_decompose.submit_gcp_stt_batches \
   --db job_state/video_state.sqlite \
-  --batch-size 15 \
-  --limit 15 \
+  --batch-size 5 \
+  --limit 5 \
   --workers 4
 ```
 
@@ -374,7 +374,9 @@ complete, the poller writes `script_google.txt`, `text_panel_google.csv`, and
 `google_sentence_panel.csv` under each video's `result_temp/`, then marks those
 videos and the batch `done`. File-level failures mark only that video `failed`;
 batch-level operation failures mark the batch and its unfinished videos
-`failed`.
+`failed`. If local transcript materialization fails, the batch remains
+`submitted` with the error recorded so the same completed Google operation can
+be polled again after the local issue is fixed.
 
 For smoke tests, use a small submitted batch and poll one operation:
 
@@ -432,7 +434,7 @@ work_dir/
      recognition -> transcript output files -> SQLite state update.
 
 5. Use Speech-to-Text v2 batch recognition properly. [submitter and poller done]
-   - Group pending audio files into batches of up to 15 GCS URIs.
+   - Group pending audio files into batches of up to 5 GCS URIs.
    - Store submitted operation names in SQLite.
    - Poll active cloud batch operations separately from local decomposition.
    - Write `script_google.txt`, `text_panel_google.csv`, and
