@@ -368,6 +368,19 @@ python -m youtube_decompose.poll_transcription_batches \
   --limit 50
 ```
 
+On Windows PowerShell, poll 10 batches every 2 minutes until no submitted
+batches remain:
+
+```powershell
+.\scripts\poll_loop.ps1
+```
+
+Override the defaults when needed:
+
+```powershell
+.\scripts\poll_loop.ps1 -Limit 10 -SleepSeconds 120
+```
+
 If a Google operation is still running, the batch remains `submitted`. If it is
 complete, the poller writes `script_google.txt`, `text_panel_google.csv`, and
 `google_sentence_panel.csv` under each video's `result_temp/`, then marks those
