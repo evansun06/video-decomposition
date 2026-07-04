@@ -105,7 +105,6 @@ def build_google_recognition_config(config: GoogleSpeechConfig) -> Any:
         model=config.model,
         features=cloud_speech.RecognitionFeatures(
             enable_word_time_offsets=True,
-            enable_word_confidence=True,
             enable_automatic_punctuation=True,
         ),
     )
