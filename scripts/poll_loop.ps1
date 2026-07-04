@@ -22,7 +22,23 @@ if ([string]::IsNullOrWhiteSpace($env:NASOUTPUTPATH)) {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$countSubmittedScript = 'import os, sqlite3; connection = sqlite3.connect(os.environ["VIDEO_DB"]); print(connection.execute("SELECT COUNT(*) FROM transcription_batches WHERE status = ''submitted''").fetchone()[0])'
+$countSubmittedScript = @'
+import os
+import sqlite3
+
+with sqlite3.connect(os.environ["VIDEO_DB"]) as connection:
+    remaining = connection.execute(
+        "SELECT COUNT(*) FROM transcription_batches WHERE status = ?",
+        ("submitted",),
+    ).fetchone()[0]
+
+print(remaining)
+'@
+$countSubmittedScriptPath = [System.IO.Path]::ChangeExtension(
+    [System.IO.Path]::GetTempFileName(),
+    ".py"
+)
+Set-Content -Path $countSubmittedScriptPath -Value $countSubmittedScript -Encoding UTF8
 
 Push-Location $repoRoot
 try {
@@ -44,7 +60,7 @@ try {
             throw "status_counts.py exited with code $LASTEXITCODE."
         }
 
-        $remainingOutput = & python -c $countSubmittedScript
+        $remainingOutput = & python $countSubmittedScriptPath
         if ($LASTEXITCODE -ne 0) {
             throw "Submitted-batch count query exited with code $LASTEXITCODE."
         }
@@ -63,4 +79,7 @@ try {
 }
 finally {
     Pop-Location
+    if ($countSubmittedScriptPath -and (Test-Path $countSubmittedScriptPath)) {
+        Remove-Item $countSubmittedScriptPath -ErrorAction SilentlyContinue
+    }
 }
