@@ -43,6 +43,25 @@ def build_google_credentials(config: GoogleSpeechConfig) -> Any | None:
     return None
 
 
+def build_speech_client(config: GoogleSpeechConfig) -> Any:
+    """Build a Speech-to-Text v2 client for the configured resource location."""
+
+    from google.api_core.client_options import ClientOptions
+    from google.cloud.speech_v2 import SpeechClient
+
+    credentials = build_google_credentials(config)
+    location = config.location.strip()
+    if location and location != "global":
+        return SpeechClient(
+            credentials=credentials,
+            client_options=ClientOptions(
+                api_endpoint=f"{location}-speech.googleapis.com",
+            ),
+        )
+
+    return SpeechClient(credentials=credentials)
+
+
 def build_recognizer_name(config: GoogleSpeechConfig) -> str:
     """Build a Speech-to-Text v2 recognizer resource name."""
 
@@ -327,14 +346,11 @@ def transcribe_audio_with_google(
 ) -> GoogleTranscriptionResult:
     """Transcribe a local WAV file via Google Speech-to-Text v2 batch recognize."""
 
-    from google.cloud.speech_v2 import SpeechClient
-
     audio_path = Path(audio_path)
     result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    credentials = build_google_credentials(config)
-    speech_client = SpeechClient(credentials=credentials)
+    speech_client = build_speech_client(config)
     gcs_uri = upload_audio_to_gcs(audio_path, config)
     request = build_batch_recognize_request(
         gcs_uris=[gcs_uri],

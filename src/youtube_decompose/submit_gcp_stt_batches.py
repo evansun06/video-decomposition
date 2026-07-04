@@ -11,7 +11,7 @@ from typing import Any, Callable, Sequence
 from .config import GoogleSpeechConfig
 from .google_speech import (
     build_batch_recognize_request,
-    build_google_credentials,
+    build_speech_client,
     generate_unique_filename,
     upload_audio_to_gcs,
 )
@@ -90,10 +90,7 @@ def _operation_name(operation: Any) -> str:
 
 
 def _default_batch_submitter(config: GoogleSpeechConfig) -> BatchSubmitter:
-    from google.cloud.speech_v2 import SpeechClient
-
-    credentials = build_google_credentials(config)
-    client = SpeechClient(credentials=credentials)
+    client = build_speech_client(config)
 
     def submit(gcs_uris: tuple[str, ...], gcs_output_uri: str) -> str:
         request = build_batch_recognize_request(

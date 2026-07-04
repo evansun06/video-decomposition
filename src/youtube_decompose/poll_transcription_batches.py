@@ -10,7 +10,7 @@ from typing import Any, Callable, Sequence
 from .config import DEFAULT_OUTPUT_ROOT, GoogleSpeechConfig
 from .folders import setup_work_folder
 from .google_speech import (
-    build_google_credentials,
+    build_speech_client,
     download_google_batch_results_from_gcs,
     write_google_transcript_outputs,
 )
@@ -110,10 +110,7 @@ def _transcript_from_file_result(
 
 
 def _default_operation_getter(config: GoogleSpeechConfig) -> OperationGetter:
-    from google.cloud.speech_v2 import SpeechClient
-
-    credentials = build_google_credentials(config)
-    client = SpeechClient(credentials=credentials)
+    client = build_speech_client(config)
 
     def get_operation(operation_name: str) -> Any:
         try:

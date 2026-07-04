@@ -168,19 +168,18 @@ Supported credential methods:
 4. Pass an in-memory service-account dict as `credentials_info`.
 5. Rely on Application Default Credentials if neither explicit option is set.
 
-Speech-to-Text v2 defaults are `location="global"`, `recognizer_id="_"`, and
+Speech-to-Text v2 defaults are `location="us"`, `recognizer_id="_"`, and
 `model="chirp_3"`. Override them through `GoogleSpeechConfig` or these env vars:
 
 ```bash
-export GOOGLE_SPEECH_LOCATION="global"
+export GOOGLE_SPEECH_LOCATION="us"
 export GOOGLE_SPEECH_RECOGNIZER="_"
 export GOOGLE_SPEECH_MODEL="chirp_3"
 ```
 
 This package enables word-level timestamps so it can write
 `text_panel_google.csv`. Google documents a shorter Chirp 3 batch limit when
-word-level timestamps are enabled; use `GOOGLE_SPEECH_MODEL="long"` for longer
-timestamped files if Chirp 3 rejects the audio length.
+word-level timestamps are enabled.
 
 Copy `.env.example` to `.env` if you want a local environment file. Do not
 commit real credential files.

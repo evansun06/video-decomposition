@@ -21,7 +21,7 @@ class GoogleSpeechConfig:
     credentials_path: str | None = None
     credentials_info: dict[str, Any] | None = None
     language_code: str = "en-US"
-    location: str = "global"
+    location: str = "us"
     recognizer_id: str = "_"
     model: str = "chirp_3"
     use_enhanced: bool = True
@@ -73,7 +73,7 @@ class GoogleSpeechConfig:
             project_id=project_id,
             credentials_path=credentials_path,
             credentials_info=credentials_info,
-            location=os.environ.get("GOOGLE_SPEECH_LOCATION", "global"),
+            location=os.environ.get("GOOGLE_SPEECH_LOCATION", "us"),
             recognizer_id=os.environ.get("GOOGLE_SPEECH_RECOGNIZER", "_"),
             model=os.environ.get("GOOGLE_SPEECH_MODEL", "chirp_3"),
         )
