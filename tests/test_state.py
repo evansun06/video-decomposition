@@ -1153,6 +1153,57 @@ class SttSubmissionTests(unittest.TestCase):
             self.assertEqual([len(batch) for batch in submitted], [2, 1])
             self.assertEqual(batch_count, 2)
 
+    def test_stt_submit_skips_videos_gte_20_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_audio_done(temp_path, ["a", "b"])
+
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "UPDATE videos SET duration_minutes = 20.0 WHERE video_id = 'b'"
+                )
+                connection.commit()
+
+            def fake_upload(
+                audio_path: Path,
+                config: GoogleSpeechConfig,
+                object_name: str | None = None,
+            ) -> str:
+                return f"gs://bucket/{object_name}"
+
+            submitted: list[tuple[str, ...]] = []
+
+            def fake_submit(gcs_uris: tuple[str, ...], output_uri: str) -> str:
+                submitted.append(gcs_uris)
+                return "operations/abc"
+
+            summary = submit_gcp_stt_batches(
+                db_path=db_path,
+                output_root=output_root,
+                batch_size=5,
+                google_config=GoogleSpeechConfig(
+                    bucket_name="bucket",
+                    project_id="project",
+                ),
+                upload_func=fake_upload,
+                batch_submitter=fake_submit,
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT video_id, transcription_status
+                    FROM videos
+                    ORDER BY video_id
+                    """
+                ).fetchall()
+
+            self.assertEqual(summary.selected, 1)
+            self.assertEqual(len(submitted), 1)
+            self.assertIn("/a_audio_full_", submitted[0][0])
+            self.assertEqual(rows[0], ("a", "running"))
+            self.assertEqual(rows[1], ("b", "queued"))
+
     def test_stt_submit_missing_audio_marks_only_that_video_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

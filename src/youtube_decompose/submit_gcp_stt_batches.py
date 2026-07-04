@@ -32,6 +32,7 @@ from .submission import (
 LOGGER_NAME = "youtube_decompose.submit_gcp_stt_batches"
 MAX_BATCH_SIZE = 5
 DEFAULT_BATCH_SIZE = 5
+MAX_STT_DURATION_MINUTES = 20.0
 
 
 UploadFunc = Callable[[str | Path, GoogleSpeechConfig, str | None], str]
@@ -125,10 +126,15 @@ def _fetch_stt_candidates(
         SELECT video_id, audio_output_path
         FROM videos
         WHERE audio_status = ?
+          AND duration_minutes < ?
           AND transcription_status IN ({placeholders})
         ORDER BY video_id
     """
-    parameters: list[object] = [StageStatus.DONE.value, *statuses]
+    parameters: list[object] = [
+        StageStatus.DONE.value,
+        MAX_STT_DURATION_MINUTES,
+        *statuses,
+    ]
     if limit is not None:
         query += " LIMIT ?"
         parameters.append(limit)
