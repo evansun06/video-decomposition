@@ -12,6 +12,20 @@ DEFAULT_OUTPUT_ROOT = Path(
 )
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+
+    raise ValueError(f"{name} must be a boolean value.")
+
+
 @dataclass(frozen=True)
 class GoogleSpeechConfig:
     """Configuration for Google Cloud Storage and Speech-to-Text clients."""
@@ -25,6 +39,8 @@ class GoogleSpeechConfig:
     recognizer_id: str = "_"
     model: str = "chirp_3"
     use_enhanced: bool = True
+    enable_word_time_offsets: bool = True
+    enable_speech_adaptation: bool = True
     audio_topic: str = (
         "interviews debt financial planning housing investing macroeconomics savings"
     )
@@ -76,6 +92,14 @@ class GoogleSpeechConfig:
             location=os.environ.get("GOOGLE_SPEECH_LOCATION", "us"),
             recognizer_id=os.environ.get("GOOGLE_SPEECH_RECOGNIZER", "_"),
             model=os.environ.get("GOOGLE_SPEECH_MODEL", "chirp_3"),
+            enable_word_time_offsets=_env_bool(
+                "GOOGLE_SPEECH_ENABLE_WORD_TIME_OFFSETS",
+                True,
+            ),
+            enable_speech_adaptation=_env_bool(
+                "GOOGLE_SPEECH_ENABLE_ADAPTATION",
+                True,
+            ),
         )
 
 

@@ -82,9 +82,11 @@ def build_google_recognition_config(config: GoogleSpeechConfig) -> Any:
 
     from google.cloud.speech_v2.types import cloud_speech
 
-    phrase_hints = [
-        phrase for phrase in config.speech_context_phrases if phrase.strip()
-    ]
+    phrase_hints = (
+        [phrase for phrase in config.speech_context_phrases if phrase.strip()]
+        if config.enable_speech_adaptation
+        else []
+    )
     adaptation = None
     if phrase_hints:
         phrase_set = cloud_speech.PhraseSet(
@@ -104,7 +106,7 @@ def build_google_recognition_config(config: GoogleSpeechConfig) -> Any:
         language_codes=[config.language_code],
         model=config.model,
         features=cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=True,
+            enable_word_time_offsets=config.enable_word_time_offsets,
             enable_automatic_punctuation=True,
         ),
     )
@@ -265,6 +267,20 @@ def _word_rows_from_google_response(response: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _transcript_text_from_google_response(response: Any) -> str:
+    transcript_parts: list[str] = []
+
+    for result in response.results:
+        if not result.alternatives:
+            continue
+
+        transcript = getattr(result.alternatives[0], "transcript", "")
+        if transcript:
+            transcript_parts.append(str(transcript).strip())
+
+    return " ".join(part for part in transcript_parts if part)
+
+
 def _sentence_rows_from_word_rows(
     word_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -318,6 +334,8 @@ def write_google_transcript_outputs(
     word_rows = _word_rows_from_google_response(response)
     sentence_rows = _sentence_rows_from_word_rows(word_rows)
     transcript_text = " ".join(row["Text"] for row in word_rows)
+    if not transcript_text:
+        transcript_text = _transcript_text_from_google_response(response)
 
     transcript_path = result_dir / "script_google.txt"
     text_panel_path = result_dir / "text_panel_google.csv"

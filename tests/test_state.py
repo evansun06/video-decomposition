@@ -38,7 +38,10 @@ from youtube_decompose.submit_gcp_stt_batches import (
     submit_gcp_stt_batches,
 )
 from youtube_decompose.submit_image_decomposition import submit_image_decomposition
-from youtube_decompose.google_speech import GoogleTranscriptionResult
+from youtube_decompose.google_speech import (
+    GoogleTranscriptionResult,
+    write_google_transcript_outputs,
+)
 from youtube_decompose.config import GoogleSpeechConfig
 from youtube_decompose.job_state.util import (
     non_latin_title_ratio,
@@ -1270,6 +1273,22 @@ def fake_transcript(*words: str) -> SimpleNamespace:
     )
 
 
+def fake_transcript_text_only(*parts: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        results=[
+            SimpleNamespace(
+                alternatives=[
+                    SimpleNamespace(
+                        transcript=part,
+                        words=[],
+                    )
+                ]
+            )
+            for part in parts
+        ]
+    )
+
+
 def fake_operation(
     *,
     done: bool = True,
@@ -1626,6 +1645,25 @@ class BatchPollingTests(unittest.TestCase):
             self.assertEqual(row[0], "done")
             self.assertEqual(Path(row[1]).read_text(encoding="utf-8"), "from gcs.")
             download_results.assert_called_once()
+
+    def test_transcript_text_falls_back_when_word_offsets_are_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_dir = Path(temp_dir)
+
+            transcript_text, transcript_path, text_panel_path, sentence_panel_path = (
+                write_google_transcript_outputs(
+                    fake_transcript_text_only("hello world.", "second sentence."),
+                    result_dir,
+                )
+            )
+
+            self.assertEqual(transcript_text, "hello world. second sentence.")
+            self.assertEqual(
+                transcript_path.read_text(encoding="utf-8"),
+                "hello world. second sentence.",
+            )
+            self.assertTrue(text_panel_path.exists())
+            self.assertTrue(sentence_panel_path.exists())
 
     def test_poller_cli_one_pass_exits_with_no_submitted_batches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
