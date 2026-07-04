@@ -61,11 +61,18 @@ try {
         Write-Host ""
         Write-Host "[$timestamp] Polling up to $Limit submitted batches..."
 
-        $pollOutput = & python -m youtube_decompose.poll_transcription_batches `
-            --db $env:VIDEO_DB `
-            --output-root $env:NASOUTPUTPATH `
-            --limit $Limit 2>&1
-        $pollExitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $pollOutput = & python -m youtube_decompose.poll_transcription_batches `
+                --db $env:VIDEO_DB `
+                --output-root $env:NASOUTPUTPATH `
+                --limit $Limit 2>&1
+            $pollExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $pollOutput | ForEach-Object { Write-Host $_ }
 
         if ($pollExitCode -ne 0) {
