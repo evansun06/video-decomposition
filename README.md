@@ -378,7 +378,7 @@ batches remain:
 Override the defaults when needed:
 
 ```powershell
-.\scripts\poll_loop.ps1 -Limit 10 -SleepSeconds 120
+.\scripts\poll_loop.ps1 -Limit 10 -SleepSeconds 120 -QuotaSleepSeconds 600
 ```
 
 If a Google operation is still running, the batch remains `submitted`. If it is

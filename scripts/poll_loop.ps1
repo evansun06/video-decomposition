@@ -1,6 +1,7 @@
 param(
     [int]$Limit = 10,
-    [int]$SleepSeconds = 120
+    [int]$SleepSeconds = 120,
+    [int]$QuotaSleepSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,10 @@ if ($Limit -lt 1) {
 
 if ($SleepSeconds -lt 1) {
     throw "SleepSeconds must be at least 1."
+}
+
+if ($QuotaSleepSeconds -lt 1) {
+    throw "QuotaSleepSeconds must be at least 1."
 }
 
 if ([string]::IsNullOrWhiteSpace($env:VIDEO_DB)) {
@@ -40,6 +45,15 @@ $countSubmittedScriptPath = [System.IO.Path]::ChangeExtension(
 )
 Set-Content -Path $countSubmittedScriptPath -Value $countSubmittedScript -Encoding UTF8
 
+function Test-QuotaError {
+    param([string]$Text)
+
+    return $Text -match "RESOURCE_EXHAUSTED" `
+        -or $Text -match "ResourceExhausted" `
+        -or $Text -match "Resource has been exhausted" `
+        -or $Text -match "check quota"
+}
+
 Push-Location $repoRoot
 try {
     while ($true) {
@@ -47,12 +61,22 @@ try {
         Write-Host ""
         Write-Host "[$timestamp] Polling up to $Limit submitted batches..."
 
-        & python -m youtube_decompose.poll_transcription_batches `
+        $pollOutput = & python -m youtube_decompose.poll_transcription_batches `
             --db $env:VIDEO_DB `
             --output-root $env:NASOUTPUTPATH `
-            --limit $Limit
-        if ($LASTEXITCODE -ne 0) {
-            throw "poll_transcription_batches exited with code $LASTEXITCODE."
+            --limit $Limit 2>&1
+        $pollExitCode = $LASTEXITCODE
+        $pollOutput | ForEach-Object { Write-Host $_ }
+
+        if ($pollExitCode -ne 0) {
+            $pollText = $pollOutput | Out-String
+            if (Test-QuotaError $pollText) {
+                Write-Warning "Quota/resource exhaustion hit; sleeping $QuotaSleepSeconds seconds before retrying."
+                Start-Sleep -Seconds $QuotaSleepSeconds
+                continue
+            }
+
+            throw "poll_transcription_batches exited with code $pollExitCode."
         }
 
         & python status_counts.py $env:VIDEO_DB
