@@ -19,7 +19,6 @@ from .job_state.state import DEFAULT_DB_PATH, StageStatus, ensure_database_schem
 from .submission import (
     WorkerSummary,
     add_common_arguments,
-    chunked,
     configure_logging,
     connect_sqlite,
     positive_int,
@@ -328,18 +327,29 @@ def submit_gcp_stt_batches(
             gcs_uri=gcs_uri,
         )
 
-    upload_summary: WorkerSummary[UploadResult] = run_video_workers(
-        logger_name=LOGGER_NAME,
-        action_name="GCP STT audio upload",
-        items=candidates,
-        workers=workers,
-        get_video_id=lambda candidate: candidate.video_id,
-        process_item=upload_candidate,
-    )
-
     submitted_batches = 0
     batch_submit_failed_videos = 0
-    for upload_batch in chunked(upload_summary.results, batch_size):
+    submitted_videos = 0
+    upload_failed = 0
+    pending_uploads: list[UploadResult] = []
+
+    def log_submission_progress() -> None:
+        logger.info(
+            "GCP STT submission progress videos_submitted=%s/%s "
+            "batches_submitted=%s upload_failed=%s "
+            "batch_submit_failed_videos=%s",
+            submitted_videos,
+            len(candidates),
+            submitted_batches,
+            upload_failed,
+            batch_submit_failed_videos,
+        )
+
+    def submit_upload_batch(upload_batch: tuple[UploadResult, ...]) -> None:
+        nonlocal submitted_batches
+        nonlocal batch_submit_failed_videos
+        nonlocal submitted_videos
+
         batch_id = str(uuid.uuid4())
         gcs_uris = tuple(upload.gcs_uri for upload in upload_batch)
         gcs_output_uri = _batch_output_uri(config, batch_id)
@@ -366,9 +376,11 @@ def submit_gcp_stt_batches(
             )
             batch_submit_failed_videos += len(upload_batch)
             logger.exception("GCP STT batch submission failed batch_id=%s", batch_id)
-            continue
+            log_submission_progress()
+            return
 
         submitted_batches += 1
+        submitted_videos += len(upload_batch)
         for upload in upload_batch:
             logging.LoggerAdapter(
                 logging.getLogger(LOGGER_NAME),
@@ -379,6 +391,34 @@ def submit_gcp_stt_batches(
                 operation_name,
                 upload.gcs_uri,
             )
+        log_submission_progress()
+
+    def queue_uploaded_audio(upload: UploadResult) -> None:
+        pending_uploads.append(upload)
+        if len(pending_uploads) >= batch_size:
+            upload_batch = tuple(pending_uploads)
+            pending_uploads.clear()
+            submit_upload_batch(upload_batch)
+
+    def count_upload_failure(_failure: object) -> None:
+        nonlocal upload_failed
+        upload_failed += 1
+
+    upload_summary: WorkerSummary[UploadResult] = run_video_workers(
+        logger_name=LOGGER_NAME,
+        action_name="GCP STT audio upload",
+        items=candidates,
+        workers=workers,
+        get_video_id=lambda candidate: candidate.video_id,
+        process_item=upload_candidate,
+        on_result=queue_uploaded_audio,
+        on_failure=count_upload_failure,
+    )
+
+    if pending_uploads:
+        upload_batch = tuple(pending_uploads)
+        pending_uploads.clear()
+        submit_upload_batch(upload_batch)
 
     summary = SttSubmissionSummary(
         selected=len(candidates),

@@ -34,10 +34,12 @@ from youtube_decompose.submit_audio_extraction import (
     submit_audio_extraction,
 )
 from youtube_decompose.submit_gcp_stt_batches import (
+    LOGGER_NAME as STT_SUBMIT_LOGGER_NAME,
     batch_size as parse_stt_batch_size,
     submit_gcp_stt_batches,
 )
 from youtube_decompose.submit_image_decomposition import submit_image_decomposition
+from youtube_decompose.submission import run_video_workers
 from youtube_decompose.google_speech import (
     GoogleTranscriptionResult,
     write_google_transcript_outputs,
@@ -922,6 +924,32 @@ class SubmissionScriptTests(unittest.TestCase):
             self.assertEqual(summary.selected, 1)
             self.assertEqual(rows, [("a", "done"), ("b", "failed")])
 
+    def test_worker_logs_aggregate_progress_after_each_item(self) -> None:
+        def process(item: str, _logger: object) -> str:
+            return item.upper()
+
+        with self.assertLogs("tests.progress_worker", level="INFO") as logs:
+            summary = run_video_workers(
+                logger_name="tests.progress_worker",
+                action_name="test work",
+                items=["a", "b"],
+                workers=1,
+                get_video_id=lambda item: item,
+                process_item=process,
+            )
+
+        log_text = "\n".join(logs.output)
+        self.assertEqual(summary.selected, 2)
+        self.assertEqual(summary.succeeded, 2)
+        self.assertIn(
+            "Progress test work completed=1/2 succeeded=1 failed=0 remaining=1",
+            log_text,
+        )
+        self.assertIn(
+            "Progress test work completed=2/2 succeeded=2 failed=0 remaining=0",
+            log_text,
+        )
+
     def test_audio_submit_cli_log_file_includes_video_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -1155,6 +1183,81 @@ class SttSubmissionTests(unittest.TestCase):
             self.assertEqual(summary.batches_submitted, 2)
             self.assertEqual([len(batch) for batch in submitted], [2, 1])
             self.assertEqual(batch_count, 2)
+
+    def test_stt_submit_records_batches_during_upload_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path, output_root = self._seed_audio_done(temp_path, ["a", "b"])
+            submitted: list[tuple[str, ...]] = []
+            observed_before_second_upload: dict[str, object] = {}
+
+            def fake_upload(
+                audio_path: Path,
+                config: GoogleSpeechConfig,
+                object_name: str | None = None,
+            ) -> str:
+                video_id = audio_path.parent.parent.name
+                if video_id == "b":
+                    with sqlite3.connect(db_path) as connection:
+                        rows = connection.execute(
+                            """
+                            SELECT video_id, transcription_status
+                            FROM videos
+                            ORDER BY video_id
+                            """
+                        ).fetchall()
+                        batch_count = connection.execute(
+                            "SELECT COUNT(*) FROM transcription_batches"
+                        ).fetchone()[0]
+
+                    observed_before_second_upload["submitted_count"] = len(submitted)
+                    observed_before_second_upload["batch_count"] = batch_count
+                    observed_before_second_upload["rows"] = rows
+
+                return f"gs://bucket/{object_name}"
+
+            def fake_submit(gcs_uris: tuple[str, ...], output_uri: str) -> str:
+                submitted.append(gcs_uris)
+                return f"operations/{len(submitted)}"
+
+            with self.assertLogs(STT_SUBMIT_LOGGER_NAME, level="INFO") as logs:
+                summary = submit_gcp_stt_batches(
+                    db_path=db_path,
+                    output_root=output_root,
+                    batch_size=1,
+                    workers=1,
+                    google_config=GoogleSpeechConfig(
+                        bucket_name="bucket",
+                        project_id="project",
+                    ),
+                    upload_func=fake_upload,
+                    batch_submitter=fake_submit,
+                )
+
+            log_text = "\n".join(logs.output)
+            self.assertEqual(summary.selected, 2)
+            self.assertEqual(summary.batches_submitted, 2)
+            self.assertEqual(len(submitted), 2)
+            self.assertEqual(
+                observed_before_second_upload,
+                {
+                    "submitted_count": 1,
+                    "batch_count": 1,
+                    "rows": [("a", "running"), ("b", "queued")],
+                },
+            )
+            self.assertIn(
+                "GCP STT submission progress videos_submitted=1/2 "
+                "batches_submitted=1 upload_failed=0 "
+                "batch_submit_failed_videos=0",
+                log_text,
+            )
+            self.assertIn(
+                "GCP STT submission progress videos_submitted=2/2 "
+                "batches_submitted=2 upload_failed=0 "
+                "batch_submit_failed_videos=0",
+                log_text,
+            )
 
     def test_stt_submit_skips_videos_gte_20_minutes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -246,6 +246,8 @@ def run_video_workers(
     workers: int,
     get_video_id: Callable[[T], str],
     process_item: Callable[[T, logging.LoggerAdapter], R],
+    on_result: Callable[[R], None] | None = None,
+    on_failure: Callable[[WorkerFailure], None] | None = None,
 ) -> WorkerSummary[R]:
     logger = run_logger(logger_name)
     logger.info(
@@ -257,6 +259,30 @@ def run_video_workers(
 
     results: list[R] = []
     failures: list[WorkerFailure] = []
+
+    def log_progress() -> None:
+        completed = len(results) + len(failures)
+        logger.info(
+            "Progress %s completed=%s/%s succeeded=%s failed=%s remaining=%s",
+            action_name,
+            completed,
+            len(items),
+            len(results),
+            len(failures),
+            len(items) - completed,
+        )
+
+    def record_result(result: R) -> None:
+        results.append(result)
+        log_progress()
+        if on_result is not None:
+            on_result(result)
+
+    def record_failure(failure: WorkerFailure) -> None:
+        failures.append(failure)
+        log_progress()
+        if on_failure is not None:
+            on_failure(failure)
 
     def run_one(item: T) -> R:
         video_id = get_video_id(item)
@@ -270,9 +296,9 @@ def run_video_workers(
         for item in items:
             video_id = get_video_id(item)
             try:
-                results.append(run_one(item))
+                record_result(run_one(item))
             except Exception as exc:
-                failures.append(WorkerFailure(video_id=video_id, error=str(exc)))
+                record_failure(WorkerFailure(video_id=video_id, error=str(exc)))
                 video_logger(logger_name, video_id).exception("%s failed", action_name)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -281,9 +307,9 @@ def run_video_workers(
                 item = future_to_item[future]
                 video_id = get_video_id(item)
                 try:
-                    results.append(future.result())
+                    record_result(future.result())
                 except Exception as exc:
-                    failures.append(WorkerFailure(video_id=video_id, error=str(exc)))
+                    record_failure(WorkerFailure(video_id=video_id, error=str(exc)))
                     video_logger(logger_name, video_id).exception("%s failed", action_name)
 
     summary: WorkerSummary[R] = WorkerSummary(
