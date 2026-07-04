@@ -1613,7 +1613,12 @@ class BatchPollingTests(unittest.TestCase):
             )
             response = SimpleNamespace(
                 results={
-                    gcs_uri: SimpleNamespace(uri="gs://bucket/results/a.json"),
+                    gcs_uri: SimpleNamespace(
+                        transcript=SimpleNamespace(results=[]),
+                        cloud_storage_result=SimpleNamespace(
+                            uri="gs://bucket/results/a.json"
+                        ),
+                    ),
                 }
             )
 

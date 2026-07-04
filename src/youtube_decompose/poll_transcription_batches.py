@@ -97,16 +97,35 @@ def _transcript_from_file_result(
     file_result: Any,
     google_config: GoogleSpeechConfig | None,
 ) -> Any | None:
+    inline_result = getattr(file_result, "inline_result", None)
+    inline_transcript = getattr(inline_result, "transcript", None)
+    if _has_transcript_results(inline_transcript):
+        return inline_transcript
+
     transcript = getattr(file_result, "transcript", None)
-    if transcript is not None:
+    if _has_transcript_results(transcript):
         return transcript
 
-    output_uri = getattr(file_result, "uri", None)
+    cloud_storage_result = getattr(file_result, "cloud_storage_result", None)
+    output_uri = getattr(cloud_storage_result, "uri", None)
+    if not output_uri:
+        output_uri = getattr(file_result, "uri", None)
     if output_uri:
         config = google_config or GoogleSpeechConfig.from_env()
         return download_google_batch_results_from_gcs(str(output_uri), config)
 
     return None
+
+
+def _has_transcript_results(transcript: Any) -> bool:
+    if transcript is None:
+        return False
+
+    results = getattr(transcript, "results", None)
+    if results is None:
+        return False
+
+    return bool(results)
 
 
 def _default_operation_getter(config: GoogleSpeechConfig) -> OperationGetter:
